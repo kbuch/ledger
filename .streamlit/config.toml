@@ -1,0 +1,3 @@
+[tool.streamlit.pages]
+"app.py" = { name = "Dashboard", icon = "📊" }
+"pages/monte_carlo.py" = { name = "🎲 Monte Carlo", icon = "⚡" }
