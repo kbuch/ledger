@@ -56,7 +56,7 @@ with col1:
         ['normal','block','garch','fhs','rolling'],
         help="normal, block, garch, fhs (with calibration), rolling-window"
     )
-    trials = st.number_input("Number of trials", value=50000, min_value=1, step=1000)
+    trials = st.number_input("Number of trials", value=100000, min_value=1, step=1000)
 
     interval_opts = ['30d','60d','90d','180d','1y','all']
     intervals = st.multiselect("Interval(s)", interval_opts, default=['30d'])
