@@ -175,6 +175,7 @@ config/*
 config.json
 optimize/base/*
 optimize/strats/*
+data/*.csv
 .DS_Store
 infra/.terraform/**
 infra/.terraform.lock.hcl
