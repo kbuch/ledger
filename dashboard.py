@@ -7,73 +7,199 @@ from itertools import groupby
 import os
 import io
 
+def load_trade_steward(raw):
+    """
+    Cleanly extract only FinalTradeClosedDate and TotalNetProfitLoss
+    from a messy TS export (with unquoted commas in free-text fields).
+    Returns a DataFrame with exactly two columns:
+      - 'Date Closed' (datetime64[ns], parsed M/D/YYYY)
+      - 'P/L'         (float)
+    """
+    # Read all lines
+    if hasattr(raw, "getvalue"):
+        text = raw.getvalue().decode("utf-8", "ignore").splitlines()
+    else:
+        with open(raw, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read().splitlines()
+
+    header   = text[0].split(",")
+    date_idx = header.index("FinalTradeClosedDate")
+    pl_idx   = header.index("TotalNetProfitLoss")
+    hl       = len(header)
+
+    # how many splits to do from the right so date lands in parts[-splits]
+    splits    = hl - date_idx
+    pl_offset = hl - pl_idx  # so pl is in parts[-pl_offset]
+
+    rows = []
+    for line in text[1:]:
+        # strip trailing commas so we don't get an empty final field
+        line = line.rstrip("\n").rstrip(",")
+        parts = line.rsplit(",", splits)
+        # must have produced at least splits+1 parts
+        if len(parts) < splits + 1:
+            continue
+        date_str = parts[-splits]
+        pl_str   = parts[-pl_offset]
+        rows.append({"Date Closed": date_str, "P/L": pl_str})
+
+    clean = pd.DataFrame(rows)
+    # parse the date & P/L
+    clean["Date Closed"] = pd.to_datetime(
+        clean["Date Closed"],
+        format="%m/%d/%Y",
+        errors="coerce"
+    )
+    clean["P/L"] = (
+        clean["P/L"]
+        .astype(str)
+        .str.replace(",", "")   # drop any thousands‐sep
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+
+    return clean.dropna(subset=["Date Closed"]).reset_index(drop=True)
+
 # ──────────────────────────────────────────────────────────────────────
-# 1) Ensure data directory exists
+# 📁 Data Manager: shared upload + save/load/delete
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 2) Initialize shared session_state slots
 if "trade_bytes" not in st.session_state:
     st.session_state.trade_bytes = None
     st.session_state.trade_name  = None
 
-# 3) Sidebar: Data Manager
 st.sidebar.header("📁 Data Manager")
-
-#    a) upload new (same key on both pages!)
-uploaded_file = st.sidebar.file_uploader(
+file_uploader = st.sidebar.file_uploader(
     "Upload trade-log CSV", type="csv", key="trade_uploader"
 )
-if uploaded_file is not None:
-    # stash raw bytes + filename
-    st.session_state.trade_bytes = uploaded_file.getvalue()
-    st.session_state.trade_name  = uploaded_file.name
+if file_uploader is not None:
+    st.session_state.trade_bytes = file_uploader.getvalue()
+    st.session_state.trade_name  = file_uploader.name
 
-#    b) show current upload
 if st.session_state.trade_name:
     st.sidebar.markdown(f"**Uploaded:** {st.session_state.trade_name}")
 
-#    c) save uploaded to disk
-save_name = st.sidebar.text_input("Save as (no .csv)", key="save_name")
-if st.sidebar.button("Save uploaded log"):
+save_name_mc = st.sidebar.text_input(
+    "Save as (no .csv)", key="save_name_mc"
+)
+if st.sidebar.button("Save uploaded log", key="save_button_mc"):
     if not st.session_state.trade_bytes:
         st.sidebar.warning("No file to save.")
-    elif not save_name.strip():
+    elif not save_name_mc.strip():
         st.sidebar.warning("Please enter a name.")
     else:
-        path = os.path.join(DATA_DIR, f"{save_name}.csv")
+        path = os.path.join(DATA_DIR, f"{save_name_mc}.csv")
         with open(path, "wb") as f:
             f.write(st.session_state.trade_bytes)
-        st.sidebar.success(f"Saved as {save_name}.csv")
+        st.sidebar.success(f"Saved as {save_name_mc}.csv")
 
-#    d) list / delete persisted CSVs
 st.sidebar.subheader("Saved Logs")
 saved_files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".csv"))
 selected_saved = st.sidebar.selectbox(
-    "Load saved log", [""] + saved_files, key="selected_saved_file"
+    "Load saved log", [""] + saved_files, key="selected_saved_file_mc"
 )
-if selected_saved and st.sidebar.button("Delete selected log"):
+if selected_saved and st.sidebar.button("Delete selected log", key="delete_button_mc"):
     os.remove(os.path.join(DATA_DIR, selected_saved))
     st.sidebar.success(f"Deleted {selected_saved}")
     st.experimental_rerun()
 
-# 4) Determine which CSV to load
 if selected_saved:
-    df = pd.read_csv(
-        os.path.join(DATA_DIR, selected_saved),
-        parse_dates=["Date Closed"],
-    )
+    uploaded = os.path.join(DATA_DIR, selected_saved)
 elif st.session_state.trade_bytes:
-    df = pd.read_csv(
-        io.BytesIO(st.session_state.trade_bytes),
-        parse_dates=["Date Closed"],
-    )
+    uploaded = io.BytesIO(st.session_state.trade_bytes)
 else:
-    st.info("Please upload or select a CSV trade-log to begin.")
-    st.stop()
-# ──────────────────────────────────────────────────────────────────────
+    uploaded = None
 
-# ----- Your original dashboard code below, unchanged -----
+if not uploaded:
+    st.info("Please upload a CSV with your P/L data (e.g. columns 'Date Opened' and 'P/L').")
+    st.stop()
+
+# ──────────────────────────────────────────────────────────────────────
+# Detect TS by peeking at header
+if hasattr(uploaded, "getvalue"):
+    first = uploaded.getvalue().splitlines()[0].decode("utf-8", "ignore")
+else:
+    with open(uploaded, "r", encoding="utf-8", errors="ignore") as f:
+        first = f.readline()
+
+if "FinalTradeClosedDate" in first and "TotalNetProfitLoss" in first:
+    # a TradeSteward log
+    df = load_trade_steward(uploaded)
+else:
+    # Option Omega log
+    if hasattr(uploaded, "seek"):
+        uploaded.seek(0)
+    try:
+        df = pd.read_csv(uploaded, parse_dates=["Date Closed"])
+    except pd.errors.EmptyDataError:
+        st.error("⚠️ The selected CSV is empty or invalid.")
+        st.stop()
+
+# ────────────────────────────────────────────────────────────────────
+# 🔄 Auto-detect OO vs. TS & unify into df["Date Closed"] / df["P/L"]
+
+# 1) Option Omega exact headers
+oo_date = next((c for c in df.columns if c.strip().lower()=="date closed"), None)
+oo_pl   = next((c for c in df.columns if c.strip().lower()=="p/l"),          None)
+
+# 2) TradeSteward headers by substring
+ts_date = next(
+    (c for c in df.columns
+     if "finaltradecloseddate" in c.replace("_","").lower()),
+    None
+)
+ts_pl   = next(
+    (c for c in df.columns
+     if "totalnetprofitloss"   in c.replace("_","").lower()),
+    None
+)
+
+if oo_date and oo_pl:
+    # Option Omega
+    date_col, pl_col = oo_date, oo_pl
+    df["Date Closed"] = pd.to_datetime(
+        df[date_col], errors="coerce"
+    )
+    df["P/L"]         = pd.to_numeric(
+        df[pl_col], errors="coerce"
+    ).fillna(0)
+
+elif ts_date and ts_pl:
+    # TradeSteward: parse only the DATE (M/D/YYYY)
+    date_col, pl_col = ts_date, ts_pl
+    df["Date Closed"] = pd.to_datetime(
+        df[date_col],
+        format="%m/%d/%Y",
+        errors="coerce"
+    )
+    df["P/L"]         = pd.to_numeric(
+        df[pl_col],
+        errors="coerce"
+    ).fillna(0)
+
+else:
+    # Nothing auto-detected—let the user type in whatever
+    date_col = st.text_input("Date column name", value="", key="auto_date_col")
+    pl_col   = st.text_input("P/L column name",   value="", key="auto_pl_col")
+    if not date_col or not pl_col:
+        st.error("Please specify your date and P/L columns.")
+        st.stop()
+    df["Date Closed"] = pd.to_datetime(
+        df[date_col], errors="coerce"
+    )
+    df["P/L"]         = pd.to_numeric(
+        df[pl_col], errors="coerce"
+    ).fillna(0)
+
+# 3) Drop any rows where the date failed to parse
+df = df.dropna(subset=["Date Closed"])
+
+# 4) If that leaves us empty, bail out now
+if df.empty:
+    st.warning("⚠️ No valid trades after parsing your date/P&L columns.")
+    st.stop()
+# ────────────────────────────────────────────────────────────────────
 
 st.title("Trading Performance Dashboard")
 
@@ -146,6 +272,11 @@ mask = (
     (daily["Date Closed"] <= pd.to_datetime(end_date))
 )
 daily = daily.loc[mask].reset_index(drop=True)
+
+if daily.empty:
+    st.warning("⚠️ No trades found in that date range. "
+               "Please check your date column mapping or adjust the range.")
+    st.stop()
 
 # Compute equity and drawdown
 daily["Equity"]      = daily["P/L"].cumsum()

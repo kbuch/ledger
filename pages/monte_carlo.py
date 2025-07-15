@@ -16,6 +16,59 @@ from mcs import (
 )
 import os, io
 
+def load_trade_steward(raw):
+    """
+    Cleanly extract only FinalTradeClosedDate and TotalNetProfitLoss
+    from a messy TS export (with unquoted commas in free-text fields).
+    Returns a DataFrame with exactly two columns:
+      - 'Date Closed' (datetime64[ns], parsed M/D/YYYY)
+      - 'P/L'         (float)
+    """
+    # Read all lines
+    if hasattr(raw, "getvalue"):
+        text = raw.getvalue().decode("utf-8", "ignore").splitlines()
+    else:
+        with open(raw, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read().splitlines()
+
+    header   = text[0].split(",")
+    date_idx = header.index("FinalTradeClosedDate")
+    pl_idx   = header.index("TotalNetProfitLoss")
+    hl       = len(header)
+
+    # how many splits to do from the right so date lands in parts[-splits]
+    splits    = hl - date_idx
+    pl_offset = hl - pl_idx  # so pl is in parts[-pl_offset]
+
+    rows = []
+    for line in text[1:]:
+        # strip trailing commas so we don't get an empty final field
+        line = line.rstrip("\n").rstrip(",")
+        parts = line.rsplit(",", splits)
+        # must have produced at least splits+1 parts
+        if len(parts) < splits + 1:
+            continue
+        date_str = parts[-splits]
+        pl_str   = parts[-pl_offset]
+        rows.append({"Date Closed": date_str, "P/L": pl_str})
+
+    clean = pd.DataFrame(rows)
+    # parse the date & P/L
+    clean["Date Closed"] = pd.to_datetime(
+        clean["Date Closed"],
+        format="%m/%d/%Y",
+        errors="coerce"
+    )
+    clean["P/L"] = (
+        clean["P/L"]
+        .astype(str)
+        .str.replace(",", "")   # drop any thousands‐sep
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+
+    return clean.dropna(subset=["Date Closed"]).reset_index(drop=True)
+
 st.set_page_config(page_title="Monte Carlo Simulator", layout="wide")
 st.title("🔢 Monte Carlo Simulator")
 
@@ -73,33 +126,111 @@ else:
 if not uploaded:
     st.info("Please upload a CSV with your P/L data (e.g. columns 'Date Opened' and 'P/L').")
     st.stop()
+
 # ──────────────────────────────────────────────────────────────────────
 
-# Column names
-date_col = st.text_input(
-    "Date column name", value="Date Opened", key="mc_date_col"
+# Detect TS by peeking at header
+if hasattr(uploaded, "getvalue"):
+    first = uploaded.getvalue().splitlines()[0].decode("utf-8", "ignore")
+else:
+    with open(uploaded, "r", encoding="utf-8", errors="ignore") as f:
+        first = f.readline()
+
+if "FinalTradeClosedDate" in first and "TotalNetProfitLoss" in first:
+    # a TradeSteward log
+    df = load_trade_steward(uploaded)
+else:
+    # Option Omega log
+    if hasattr(uploaded, "seek"):
+        uploaded.seek(0)
+    try:
+        df = pd.read_csv(uploaded, parse_dates=["Date Closed"])
+    except pd.errors.EmptyDataError:
+        st.error("⚠️ The selected CSV is empty or invalid.")
+        st.stop()
+
+# ────────────────────────────────────────────────────────────────────
+# 🔄 Auto-detect OO vs. TS & unify into df["Date Closed"] / df["P/L"]
+
+# 1) Option Omega exact headers
+oo_date = next((c for c in df.columns if c.strip().lower()=="date closed"), None)
+oo_pl   = next((c for c in df.columns if c.strip().lower()=="p/l"),          None)
+
+# 2) TradeSteward headers by substring
+ts_date = next(
+    (c for c in df.columns
+     if "finaltradecloseddate" in c.replace("_","").lower()),
+    None
 )
-pl_col   = st.text_input(
-    "P/L column name",   value="P/L",         key="mc_pl_col"
+ts_pl   = next(
+    (c for c in df.columns
+     if "totalnetprofitloss"   in c.replace("_","").lower()),
+    None
 )
 
-# Load and validate
-df = pd.read_csv(uploaded)
-if date_col not in df or pl_col not in df:
-    st.error(f"CSV must contain '{date_col}' and '{pl_col}'.")
+if oo_date and oo_pl:
+    # Option Omega
+    date_col, pl_col = oo_date, oo_pl
+    df["Date Closed"] = pd.to_datetime(
+        df[date_col], errors="coerce"
+    )
+    df["P/L"]         = pd.to_numeric(
+        df[pl_col], errors="coerce"
+    ).fillna(0)
+
+elif ts_date and ts_pl:
+    # TradeSteward: parse only the DATE (M/D/YYYY)
+    date_col, pl_col = ts_date, ts_pl
+    df["Date Closed"] = pd.to_datetime(
+        df[date_col],
+        format="%m/%d/%Y",
+        errors="coerce"
+    )
+    df["P/L"]         = pd.to_numeric(
+        df[pl_col],
+        errors="coerce"
+    ).fillna(0)
+
+else:
+    # Nothing auto-detected—let the user type in whatever
+    date_col = st.text_input("Date column name", value="", key="auto_date_col")
+    pl_col   = st.text_input("P/L column name",   value="", key="auto_pl_col")
+    if not date_col or not pl_col:
+        st.error("Please specify your date and P/L columns.")
+        st.stop()
+    df["Date Closed"] = pd.to_datetime(
+        df[date_col], errors="coerce"
+    )
+    df["P/L"]         = pd.to_numeric(
+        df[pl_col], errors="coerce"
+    ).fillna(0)
+
+# 3) If that leaves us empty, bail out now
+if df.empty:
+    st.warning("⚠️ No valid trades after parsing your date/P&L columns.")
     st.stop()
+# ────────────────────────────────────────────────────────────────────
 
 # Aggregate daily P/L
 df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 df = df.dropna(subset=[date_col])
 df['Date'] = df[date_col].dt.date
 daily = df.groupby('Date')[pl_col].sum()
+if daily.empty:
+    st.warning(
+        "⚠️ No trades found after grouping by day. "
+        "Please check your date/P&L column mapping."
+    )
+    st.stop()
 
 # Fill missing calendar days
 days = pd.date_range(daily.index.min(), daily.index.max(), freq='D').date
 daily = daily.reindex(days, fill_value=0)
 daily_returns = daily.values
 N = len(daily_returns)
+if N == 0:
+    st.warning("⚠️ No P/L data after aggregating. Check your date/P&L column mapping.")
+    st.stop()
 st.markdown(f"**Loaded {N:,} days of P/L data**")
 
 # 2) UI controls (all keys set for persistence)
