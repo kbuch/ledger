@@ -64,7 +64,7 @@ def load_trade_steward(raw):
     return clean.dropna(subset=["Date Closed"]).reset_index(drop=True)
 
 st.set_page_config(page_title="Dashboard", layout="wide")
-st.title("📊 Dashboard: Trading Performance")
+st.title("📊 Dashboard")
 
 # ──────────────────────────────────────────────────────────────────────
 # 📁 Data Manager: shared upload + save/load/delete
