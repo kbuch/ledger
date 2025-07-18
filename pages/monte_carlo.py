@@ -70,7 +70,7 @@ def load_trade_steward(raw):
     return clean.dropna(subset=["Date Closed"]).reset_index(drop=True)
 
 st.set_page_config(page_title="Monte Carlo Simulator", layout="wide")
-st.title("🔢 Monte Carlo Simulator")
+st.title("🎲 Monte Carlo Simulator")
 
 # ──────────────────────────────────────────────────────────────────────
 # 📁 Data Manager: shared upload + save/load/delete

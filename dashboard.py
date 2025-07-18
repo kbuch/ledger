@@ -3,9 +3,12 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from itertools import groupby
 import os
 import io
+import datetime
+from dateutil.relativedelta import relativedelta
 
 def load_trade_steward(raw):
     """
@@ -59,6 +62,9 @@ def load_trade_steward(raw):
     )
 
     return clean.dropna(subset=["Date Closed"]).reset_index(drop=True)
+
+st.set_page_config(page_title="Dashboard", layout="wide")
+st.title("📊 Dashboard: Trading Performance")
 
 # ──────────────────────────────────────────────────────────────────────
 # 📁 Data Manager: shared upload + save/load/delete
@@ -203,79 +209,107 @@ if df.empty:
 
 st.title("Trading Performance Dashboard")
 
-# Read and preprocess data
-daily = df.groupby("Date Closed")["P/L"].sum().sort_index().reset_index()
+# Aggregate P/L by close date and fill in any missing days
+daily = df.groupby("Date Closed")["P/L"].sum().sort_index()
+days  = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+daily = daily.reindex(days, fill_value=0).to_frame(name="P/L")
 
-# Determine full-range bounds
-min_date = daily["Date Closed"].min()
-max_date = daily["Date Closed"].max()
-today    = pd.Timestamp.today().normalize()
+# ─── Date Range Presets (relative to latest trade date) ────────────────────
+latest_date   = daily.index.max()
+earliest_date = daily.index.min()
 
-# Preset range selector
-preset = st.selectbox(
-    "Date Range Presets",
-    [
-        "All Time",
-        "Year to Date",
-        "Last 30 Days",
-        "Last 60 Days",
-        "Last 90 Days",
-        "Last Year",
-        "Today Only",
-        "Custom",
-    ],
-    index=0,
-)
+preset = st.selectbox("Date Range Presets", [
+    "Today", "Yesterday", "Last 7 Days", "Last 30 Days", "Last 90 Days",
+    "Last Month", "Week to Date", "Month to Date", "Year to Date",
+    "Last Year", "Trailing 1-Year", "All Time", "Custom Range"
+], index=11)  # default = "All Time"
 
-# Compute start/end based on preset
-if preset == "All Time":
-    start_date, end_date = min_date, max_date
-elif preset == "Year to Date":
-    start_date = pd.Timestamp(year=today.year, month=1, day=1)
-    end_date   = today if today <= max_date else max_date
+if preset == "Today":
+    start_date = end_date = latest_date
+
+elif preset == "Yesterday":
+    start_date = end_date = latest_date - datetime.timedelta(days=1)
+
+elif preset == "Last 7 Days":
+    start_date = latest_date - datetime.timedelta(days=6)
+    end_date   = latest_date
+
 elif preset == "Last 30 Days":
-    start_date = max(today - pd.Timedelta(days=30), min_date)
-    end_date   = today  if today <= max_date else max_date
-elif preset == "Last 60 Days":
-    start_date = max(today - pd.Timedelta(days=60), min_date)
-    end_date   = today  if today <= max_date else max_date
-elif preset == "Last 90 Days":
-    start_date = max(today - pd.Timedelta(days=90), min_date)
-    end_date   = today  if today <= max_date else max_date
-elif preset == "Last Year":
-    prev_year  = today.year - 1
-    start_date = pd.Timestamp(year=prev_year, month=1,  day=1)
-    end_date   = pd.Timestamp(year=prev_year, month=12, day=31)
-    start_date = max(start_date, min_date)
-    end_date   = min(end_date,   max_date)
-elif preset == "Today Only":
-    if today < min_date:
-        start_date = end_date = min_date
-    elif today > max_date:
-        start_date = end_date = max_date
-    else:
-        start_date = end_date = today
-else:  # Custom
-    start_date, end_date = st.date_input(
-        "Select start and end dates",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date,
-    )
-    if start_date > end_date:
-        st.error("❗ Start date must be before end date.")
-        st.stop()
+    start_date = latest_date - datetime.timedelta(days=29)
+    end_date   = latest_date
 
-# Filter daily series
-mask = (
-    (daily["Date Closed"] >= pd.to_datetime(start_date)) &
-    (daily["Date Closed"] <= pd.to_datetime(end_date))
-)
-daily = daily.loc[mask].reset_index(drop=True)
+elif preset == "Last 90 Days":
+    start_date = latest_date - datetime.timedelta(days=89)
+    end_date   = latest_date
+
+elif preset == "Last Month":
+    prev_month_end = latest_date.replace(day=1) - datetime.timedelta(days=1)
+    start_date     = prev_month_end.replace(day=1)
+    end_date       = prev_month_end
+
+elif preset == "Week to Date":
+    start_date = latest_date - datetime.timedelta(days=latest_date.weekday())
+    end_date   = latest_date
+
+elif preset == "Month to Date":
+    start_date = latest_date.replace(day=1)
+    end_date   = latest_date
+
+elif preset == "Year to Date":
+    start_date = latest_date.replace(month=1, day=1)
+    end_date   = latest_date
+
+elif preset == "Last Year":
+    prev_year_end = latest_date.replace(month=1, day=1) - datetime.timedelta(days=1)
+    start_date    = prev_year_end.replace(month=1, day=1)
+    end_date      = prev_year_end
+
+elif preset == "Trailing 1-Year":
+    start_date = latest_date - relativedelta(years=1)
+    end_date   = latest_date
+
+elif preset == "All Time":
+    start_date = earliest_date
+    end_date   = latest_date
+
+else:  # Custom Range
+    custom = st.date_input(
+        "Custom Date Range",
+        value=(earliest_date, latest_date),
+        min_value=earliest_date,
+        max_value=latest_date,
+    )
+    # unpack safely even if user only clicks one date
+    if isinstance(custom, (list, tuple)):
+        if len(custom) >= 2:
+            start_date, end_date = custom[0], custom[1]
+        elif len(custom) == 1:
+            start_date = end_date = custom[0]
+        else:
+            start_date = earliest_date
+            end_date = latest_date
+    else:
+        start_date = end_date = custom
+
+# show which slice we’re looking at
+st.markdown(f"**Viewing:** {start_date.strftime('%m/%d/%Y')} – {end_date.strftime('%m/%d/%Y')}")
+
+# convert to Timestamps so dtype matches
+start_ts = pd.to_datetime(start_date)
+end_ts   = pd.to_datetime(end_date)
+mask     = (daily.index >= start_ts) & (daily.index <= end_ts)
+daily    = daily.loc[mask]
 
 if daily.empty:
-    st.warning("⚠️ No trades found in that date range. "
-               "Please check your date column mapping or adjust the range.")
+    st.warning("⚠️ No trades found in that date range.")
+    st.stop()
+# ─────────────────────────────────────────────────────────────────────────────
+
+# now rebuild your returns & count
+daily_returns = daily.values
+N             = len(daily_returns)
+if N == 0:
+    st.warning("⚠️ No P/L data after aggregating. Check your date/P&L column mapping.")
     st.stop()
 
 # Compute equity and drawdown
@@ -302,7 +336,7 @@ avg_loss            = daily.loc[daily["Loss"], "P/L"].mean() if daily["Loss"].an
 
 max_drawdown      = daily["Drawdown"].max()
 current_drawdown  = daily["Drawdown"].iloc[-1]
-last_ath_idx      = daily["Equity"].cummax().idxmax()
+last_ath_idx      = daily["Equity"].cummax().values.argmax()
 days_in_dd        = len(daily) - last_ath_idx - 1
 
 # Display metrics
@@ -319,16 +353,31 @@ col2.metric("Current Drawdown",    f"${current_drawdown:.2f}")
 col3.metric("Days in Drawdown",    f"{days_in_dd}")
 
 # Plot equity curve and drawdown
-fig, ax = plt.subplots()
-ax.plot(daily["Date Closed"], daily["Equity"], label="Equity Curve")
+fig, ax = plt.subplots(figsize=(10, 5))  # make it a bit less gigantic
+# convert our datetime‐index into Matplotlib floats
+dt_idx      = pd.to_datetime(daily.index)
+x_vals      = mdates.date2num(dt_idx.to_pydatetime())
+equity_vals = daily["Equity"].values
+peak_vals   = daily["RunningPeak"].values
+dd_mask     = daily["Drawdown"].values > 0
+
+ax.plot(x_vals, equity_vals, "-", label="Equity Curve")
 ax.fill_between(
-    daily["Date Closed"],
-    daily["Equity"],
-    daily["RunningPeak"],
-    where=daily["Drawdown"] > 0,
+    x_vals,
+    equity_vals,
+    peak_vals,
+    where=dd_mask,
     alpha=0.3,
     label="Drawdown"
 )
+
+# smarter ticks & rotated labels
+locator = mdates.AutoDateLocator(maxticks=15)
+formatter = mdates.AutoDateFormatter(locator)
+ax.xaxis.set_major_locator(locator)
+ax.xaxis.set_major_formatter(formatter)
+fig.autofmt_xdate()
+
 ax.set_xlabel("Date")
 ax.set_ylabel("Equity")
 ax.legend()
@@ -336,6 +385,4 @@ st.pyplot(fig)
 
 # Show raw daily data
 st.subheader("Daily P/L Data")
-st.dataframe(
-    daily.set_index("Date Closed")[["P/L", "Equity", "Drawdown"]]
-)
+st.dataframe(daily[["P/L", "Equity", "Drawdown"]])
