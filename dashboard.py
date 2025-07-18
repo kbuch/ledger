@@ -207,7 +207,7 @@ if df.empty:
     st.stop()
 # ────────────────────────────────────────────────────────────────────
 
-st.title("Trading Performance Dashboard")
+st.title("Trading Performance Metrics")
 
 # Aggregate P/L by close date and fill in any missing days
 daily = df.groupby("Date Closed")["P/L"].sum().sort_index()
