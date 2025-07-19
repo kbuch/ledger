@@ -297,21 +297,22 @@ st.markdown(f"**Viewing:** {start_date.strftime('%m/%d/%Y')} – {end_date.strft
 # convert to Timestamps so dtype matches
 start_ts = pd.to_datetime(start_date)
 end_ts   = pd.to_datetime(end_date)
+
+# 1) slice the daily P/L series to the window
 mask     = (daily.index >= start_ts) & (daily.index <= end_ts)
 daily    = daily.loc[mask]
+
+# 2) **also** slice the raw trades for all trade-level metrics
+df       = df.loc[
+    (df["Date Closed"] >= start_ts) &
+    (df["Date Closed"] <= end_ts)
+]
 
 if daily.empty:
     st.warning("⚠️ No trades found in that date range.")
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
-
-# now rebuild your returns & count
-daily_returns = daily.values
-N             = len(daily_returns)
-if N == 0:
-    st.warning("⚠️ No P/L data after aggregating. Check your date/P&L column mapping.")
-    st.stop()
 
 # Compute equity and drawdown
 daily["Equity"]      = daily["P/L"].cumsum()
@@ -339,7 +340,6 @@ win_pct     = win_count / max(total_trades, 1) * 100.0
 # ─── 2) Daily equity & drawdown ────────────────────────────────────────────────
 cum_equity  = daily["Equity"]
 daily_dd    = daily["Drawdown"]
-current_dd  = daily_dd.iloc[-1]
 max_dd      = daily_dd.max()
 
 # ─── 3) Days in current drawdown ───────────────────────────────────────────────
@@ -410,10 +410,8 @@ biggest_day_win    = daily["P/L"].max()
 biggest_day_loss   = daily["P/L"].min()
 
 # ─── 8) Total profit & CAGR ───────────────────────────────────────────────────
-total_profit = daily["P/L"].sum()
-
 if starting_capital is not None:
-    end_equity = starting_capital + total_profit
+    end_equity = starting_capital + net_profit
     days_diff  = (daily.index.max() - daily.index.min()).days
     if days_diff > 0:
         years = days_diff / 365.25
@@ -462,53 +460,87 @@ if temp_run > 0:
 max_win_streak  = max(win_runs)  if win_runs  else 0
 max_loss_streak = max(loss_runs) if loss_runs else 0
 
+# Compute additional metrics
+
+# 1) Max Drawdown (%) relative to starting capital (or “–” if none provided)
+if starting_capital is not None:
+    max_dd_pct = max_dd / starting_capital * 100.0
+else:
+    max_dd_pct = None
+
+# 3) Average daily and per-trade P/L
+avg_daily_pnl = daily["P/L"].mean() if not daily["P/L"].empty else 0.0
+avg_trade_pnl = df["P/L"].mean()  if not df["P/L"].empty   else 0.0
+
+# 4) Average win/loss streak lengths (in days)
+avg_win_streak  = sum(win_runs)  / len(win_runs)  if win_runs  else 0.0
+avg_loss_streak = sum(loss_runs) / len(loss_runs) if loss_runs else 0.0
+
+# 5) Period ROI % over the selected date range
+if starting_capital is not None and starting_capital > 0:
+    end_equity      = starting_capital + net_profit
+    period_roi_pct  = (end_equity / starting_capital - 1) * 100.0
+elif cum_equity.iloc[0] != 0:
+    period_roi_pct  = (cum_equity.iloc[-1] / cum_equity.iloc[0] - 1) * 100.0
+else:
+    period_roi_pct  = None
+
 # ─── 9) Flatten into lookup dict ────────────────────────────────────────────────
 metrics = {
     # Snapshot
-    "Net Profit ($)":        f"{net_profit:,.2f}",
-    "Current Streak (Days)": streak_label,
-    "Days in Drawdown":      f"{days_in_dd} days",
-    "Current Drawdown ($)":  f"{current_drawdown:,.2f}",
+    "Net Profit ($)":               f"{net_profit:,.2f}",
+    "Period ROI (%)":               f"{period_roi_pct:.1f}%" if period_roi_pct is not None else "-",
+    "Current Streak (Days)":        streak_label,
+    "Days in Drawdown":             f"{days_in_dd} days",
+    "Current Drawdown ($)":         f"{current_drawdown:,.2f}",
 
     # Core & trade‐level
-    "CAGR (%)":              f"{cagr:.1f}%",
-    "Trade Count":           f"{total_trades}",
-    "Win %":                 f"{win_pct:.1f}%",
+    "CAGR (%)":                     f"{cagr:.1f}%",
+    "Max Drawdown ($)":             f"{max_dd:,.2f}",
+    "Max Drawdown (%)":             f"{max_dd_pct:.1f}%" if max_dd_pct is not None else "-",
+    "Win Rate (%)":                 f"{win_pct:.1f}%",
+    "Trade Count":                  f"{total_trades}",
+    "Wins":                         f"{win_count}",
+    "Losses":                       f"{loss_count}",
 
     # Averages
-    "Avg Daily Win":         f"{avg_daily_win:,.2f}",
-    "Avg Daily Loss":        f"{avg_daily_loss:,.2f}",
-    "Avg Trade Win":         f"{avg_trade_win:.2f}",
-    "Avg Trade Loss":        f"{avg_trade_loss:.2f}",
+    "Avg Daily P/L ($)":            f"{avg_daily_pnl:,.2f}",
+    "Avg Daily Win ($)":            f"{avg_daily_win:,.2f}",
+    "Avg Daily Loss ($)":           f"{avg_daily_loss:,.2f}",
+    "Avg Trade P/L ($)":            f"{avg_trade_pnl:,.2f}",
+    "Avg Trade Win ($)":            f"{avg_trade_win:.2f}",
+    "Avg Trade Loss ($)":           f"{avg_trade_loss:.2f}",
 
-    # Streaks & drawdown
-    "Longest Win Streak":    f"{max_win_streak} days",
-    "Longest Loss Streak":   f"{max_loss_streak} days",
-    "Max Drawdown ($)":      f"{max_dd:,.2f}",
+    # Streaks
+    "Longest Win Streak (Days)":    f"{max_win_streak} days",
+    "Longest Loss Streak (Days)":   f"{max_loss_streak} days",
+    "Avg Win Streak (Days)":        f"{avg_win_streak:.1f} days",
+    "Avg Loss Streak (Days)":       f"{avg_loss_streak:.1f} days",
 
     # Extremes
-    "Biggest Trade Win":     f"{biggest_trade_win:,.2f}",
-    "Biggest Trade Loss":    f"{biggest_trade_loss:,.2f}",
-    "Biggest Day Win":       f"{biggest_day_win:,.2f}",
-    "Biggest Day Loss":      f"{biggest_day_loss:,.2f}",
+    "Biggest Trade Win ($)":         f"{biggest_trade_win:,.2f}",
+    "Biggest Trade Loss ($)":        f"{biggest_trade_loss:,.2f}",
+    "Biggest Day Win ($)":           f"{biggest_day_win:,.2f}",
+    "Biggest Day Loss ($)":          f"{biggest_day_loss:,.2f}",
 }
 
-# ─── Snapshot Metrics Panel ────────────────────────────────────────────────────
-st.header("Snapshot Metrics")
+# ─── Snapshot Metrics Panel ───────────────────────────────────────────────────
+st.header("📸 Snapshot Metrics")
 snapshot_keys = [
     "Net Profit ($)",
+    "Period ROI (%)",
     "Current Streak (Days)",
     "Days in Drawdown",
     "Current Drawdown ($)",
 ]
-for i in range(0, len(snapshot_keys), 4):
-    row = snapshot_keys[i : i + 4]
+for i in range(0, len(snapshot_keys), 5):
+    row = snapshot_keys[i : i + 5]
     cols = st.columns(len(row))
     for col, name in zip(cols, row):
         col.metric(name, metrics[name])
 
 # ─── Key Metrics (selectable) ──────────────────────────────────────────────────
-st.header("Key Metrics")
+st.header("🔑 Key Metrics")
 # Exclude snapshot items
 key_metrics_map = {k: v for k, v in metrics.items() if k not in snapshot_keys}
 default_key_metrics = list(key_metrics_map.keys())
