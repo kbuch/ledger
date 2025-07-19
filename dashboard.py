@@ -303,6 +303,7 @@ daily    = daily.loc[mask]
 if daily.empty:
     st.warning("⚠️ No trades found in that date range.")
     st.stop()
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 # now rebuild your returns & count
@@ -317,40 +318,184 @@ daily["Equity"]      = daily["P/L"].cumsum()
 daily["RunningPeak"] = daily["Equity"].cummax()
 daily["Drawdown"]    = daily["RunningPeak"] - daily["Equity"]
 
-# Compute streaks and metrics
-def compute_streaks(series):
-    return [len(list(group)) for key, group in groupby(series) if key]
+# ─── Optional Starting Capital ─────────────────────────────────────────────────
+starting_cap_input = st.number_input(
+    "Starting Capital (optional)",
+    min_value=0.0,
+    value=0.0,
+    step=100.0,
+    format="%.2f",
+)
+starting_capital = starting_cap_input if starting_cap_input > 0 else None
 
-daily["Win"]   = daily["P/L"] >  0
-daily["Loss"]  = daily["P/L"] <  0
+# ─── Compute all metrics ───────────────────────────────────────────────────────
 
-win_streaks   = compute_streaks(daily["Win"])
-loss_streaks  = compute_streaks(daily["Loss"])
+# 1) Win/Loss counts & %
+wins       = df["P/L"] > 0
+losses     = df["P/L"] <= 0
+win_count  = int(wins.sum())
+loss_count = int(losses.sum())
+total_trades = win_count + loss_count
+win_pct    = win_count / max(total_trades, 1) * 100
 
-avg_win_streak      = sum(win_streaks)  / len(win_streaks)  if win_streaks  else 0
-avg_loss_streak     = sum(loss_streaks) / len(loss_streaks) if loss_streaks else 0
-longest_win_streak  = max(win_streaks)  if win_streaks  else 0
-longest_loss_streak = max(loss_streaks) if loss_streaks else 0
-avg_win             = daily.loc[daily["Win"],  "P/L"].mean() if daily["Win"].any()  else 0
-avg_loss            = daily.loc[daily["Loss"], "P/L"].mean() if daily["Loss"].any() else 0
+# 3) Daily equity & drawdown
+cum_equity   = daily["Equity"]
+daily_dd     = daily["Drawdown"]
+current_dd   = daily_dd.iloc[-1]
+max_dd       = daily_dd.max()
 
-max_drawdown      = daily["Drawdown"].max()
-current_drawdown  = daily["Drawdown"].iloc[-1]
-last_ath_idx      = daily["Equity"].cummax().values.argmax()
-days_in_dd        = len(daily) - last_ath_idx - 1
+# 4) Days in current drawdown
+last_ath     = cum_equity.cummax().values.argmax()
+days_in_dd   = len(daily) - last_ath - 1
 
-# Display metrics
-st.header("Key Metrics")
-col1, col2, col3 = st.columns(3)
-col1.metric("Avg Win Streak",      f"{avg_win_streak:.2f} days")
-col1.metric("Avg Loss Streak",     f"{avg_loss_streak:.2f} days")
-col2.metric("Longest Win Streak",  f"{longest_win_streak} days")
-col2.metric("Longest Loss Streak", f"{longest_loss_streak} days")
-col3.metric("Avg Win",             f"${avg_win:.2f}")
-col3.metric("Avg Loss",            f"${avg_loss:.2f}")
-col1.metric("Max Drawdown",        f"${max_drawdown:.2f}")
-col2.metric("Current Drawdown",    f"${current_drawdown:.2f}")
-col3.metric("Days in Drawdown",    f"{days_in_dd}")
+# 5) Profit run since last recovery
+dd_zero      = daily_dd == 0
+if dd_zero.any():
+    last_reset = daily.index[dd_zero][-1]
+else:
+    last_reset = daily.index[0]
+profit_run   = cum_equity.iloc[-1] - cum_equity.loc[last_reset]
+# only count profit-run days if we're actually above last reset
+if profit_run > 0:
+    profit_run_days = (daily.index.max() - last_reset).days
+else:
+    profit_run_days = 0
+
+current_profit   = max(profit_run, 0)
+current_drawdown = -min(profit_run, 0)  # positive drawdown value
+
+# ─── Daily Win/Loss Streaks (calendar days) ────────────────────────────────────
+win_streaks  = []
+loss_streaks = []
+temp_streak  = 0
+
+# iterate over each calendar day’s P/L
+for pnl in daily["P/L"]:
+    if pnl > 0:
+        # winning day
+        temp_streak += 1
+    else:
+        # end any win streak
+        if temp_streak > 0:
+            win_streaks.append(temp_streak)
+        temp_streak = 0
+# catch final
+if temp_streak > 0:
+    win_streaks.append(temp_streak)
+
+# now losses
+temp_streak = 0
+for pnl in daily["P/L"]:
+    if pnl < 0:
+        temp_streak += 1
+    else:
+        if temp_streak > 0:
+            loss_streaks.append(temp_streak)
+        temp_streak = 0
+if temp_streak > 0:
+    loss_streaks.append(temp_streak)
+
+# longest runs (in days)
+max_win_streak  = max(win_streaks)  if win_streaks  else 0
+max_loss_streak = max(loss_streaks) if loss_streaks else 0
+
+# 6) Per-day & per-trade averages
+avg_daily_win   = daily.loc[daily["P/L"] > 0, "P/L"].mean() or 0
+avg_daily_loss  = daily.loc[daily["P/L"] < 0, "P/L"].mean() or 0
+avg_trade_win   = df.loc[wins,   "P/L"].mean() or 0
+avg_trade_loss  = df.loc[losses, "P/L"].mean() or 0
+
+# 7) Extremes
+biggest_trade_win  = df["P/L"].max()
+biggest_trade_loss = df["P/L"].min()
+biggest_day_win    = daily["P/L"].max()
+biggest_day_loss   = daily["P/L"].min()
+
+# 8) Total profit & CAGR
+total_profit = daily["P/L"].sum()
+if starting_capital is not None:
+    end_equity = starting_capital + total_profit
+    years      = (daily.index.max() - daily.index.min()).days / 365.25
+    cagr       = (end_equity / starting_capital) ** (1 / years) - 1
+    cagr      *= 100
+else:
+    days_count = (daily.index.max() - daily.index.min()).days + 1
+    cagr = ((cum_equity.iloc[-1] / cum_equity.iloc[0]) ** (252 / days_count) - 1) * 100
+
+# 9) Flatten into lookup dict
+metrics = {
+    # Snapshot
+    "Current Profit ($)":      f"{current_profit:,.2f}",
+    "Profit-Run Days":         f"{profit_run_days} days",
+    "Days in Drawdown":        f"{days_in_dd} days",
+    "Current Drawdown ($)":    f"{current_drawdown:,.2f}",
+
+    # Core stats
+    "Total Profit ($)":      f"{total_profit:,.2f}",
+    "CAGR (%)":              f"{cagr:.1f}%",
+    "Trade Count":           f"{total_trades}",
+    "Win %":                 f"{win_pct:.1f}%",
+
+    # Averages
+    "Avg Daily Win":         f"{avg_daily_win:,.2f}",
+    "Avg Daily Loss":        f"{avg_daily_loss:,.2f}",
+    "Avg Trade Win":         f"{avg_trade_win:.2f}",
+    "Avg Trade Loss":        f"{avg_trade_loss:.2f}",
+
+    # streaks & drawdowns
+    "Longest Win Streak":    f"{max_win_streak} days",
+    "Longest Loss Streak":   f"{max_loss_streak} days",
+    "Max Drawdown ($)":      f"{max_dd:,.2f}",
+    "Days in Drawdown":      f"{days_in_dd} days",
+
+    # Extremes
+    "Biggest Trade Win":     f"{biggest_trade_win:,.2f}",
+    "Biggest Trade Loss":    f"{biggest_trade_loss:,.2f}",
+    "Biggest Day Win":       f"{biggest_day_win:,.2f}",
+    "Biggest Day Loss":      f"{biggest_day_loss:,.2f}",
+}
+
+# ─── Snapshot Metrics Panel ────────────────────────────────────────────────────
+st.subheader("Snapshot Metrics")
+snapshot_keys = [
+    "Current Profit ($)",
+    "Profit-Run Days",
+    "Days in Drawdown",
+    "Current Drawdown ($)",
+]
+
+for i in range(0, len(snapshot_keys), 4):
+    row = snapshot_keys[i : i + 4]
+    cols = st.columns(len(row))
+    for col, name in zip(cols, row):
+        col.metric(name, metrics[name])
+
+# ─── Key Metrics (selectable) ──────────────────────────────────────────────────
+st.subheader("Key Metrics")
+# show only those metrics not already in Snapshot
+key_metrics_map = {k: v for k, v in metrics.items() if k not in snapshot_keys}
+default_key_metrics = list(key_metrics_map.keys())
+
+if st.button("Reset Key Metrics"):
+    st.session_state.pop("key_metrics", None)
+
+chosen_keys = st.multiselect(
+    "Select Key Metrics to display",
+    options=default_key_metrics,
+    default=default_key_metrics,
+    key="key_metrics",
+)
+
+if chosen_keys:
+    for i in range(0, len(chosen_keys), 4):
+        row = chosen_keys[i : i + 4]
+        cols = st.columns(len(row))
+        for col, name in zip(cols, row):
+            col.metric(name, key_metrics_map[name])
+else:
+    st.info("No Key Metrics selected. Use the dropdown above to pick metrics.")
+
+# ─── ( next up: your equity-curve plot ) ───────────────────────────────────────
 
 # Plot equity curve and drawdown
 fig, ax = plt.subplots(figsize=(10, 5))  # make it a bit less gigantic
